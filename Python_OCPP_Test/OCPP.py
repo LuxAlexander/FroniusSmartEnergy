@@ -38,7 +38,9 @@ logger = logging.getLogger("wattpilot-ocpp")
 # ---------------------------------------------------------------------------
 HOST = "0.0.0.0"        # auf allen Netzwerk-Interfaces lauschen
 PORT = 9000              # Port, den du auch in der Wattpilot-App einträgst
-CSV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wattpilot_daten.csv")
+# Jeder Serverstart schreibt in eine eigene Datei, z.B. logs/wattpilot_daten_20261119_101500.csv
+LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+CSV_FILE = os.path.join(LOG_DIR, f"wattpilot_daten_{datetime.now():%Y%m%d_%H%M%S}.csv")
 
 CSV_FIELDS = [
     "timestamp",
@@ -57,7 +59,8 @@ _csv_lock = asyncio.Lock()
 
 
 def _ensure_csv_header():
-    """Legt die CSV-Datei mit Header an, falls sie noch nicht existiert."""
+    """Legt den Ordner logs/ und die CSV-Datei mit Header an."""
+    os.makedirs(LOG_DIR, exist_ok=True)
     if not os.path.exists(CSV_FILE):
         with open(CSV_FILE, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
@@ -165,7 +168,7 @@ class WattpilotChargePoint(CP):
                     transaction_id=transaction_id,
                     meter_value=sample.get("value"),
                     raw_payload=f"measurand={sample.get('measurand', 'Energy.Active.Import.Register')}, "
-                                 f"unit={sample.get('unit', '')}, ts={ts}",
+                                 f"unit={sample.get('unit', '')}, phase={sample.get('phase', '')}, ts={ts}",
                 )
         return call_result.MeterValues()
 
