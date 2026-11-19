@@ -12,22 +12,26 @@ die OCPP-Backend-URL auf dieses Skript zeigen lassen, z.B.:
 ("WATTPILOT01" ist hier die frei wählbare Charge-Point-ID, siehe unten)
 
 Installation:
-    pip install ocpp websockets --break-system-packages
+    python -m pip install -r requirements.txt
 
 Start:
-    python3 wattpilot_ocpp_logger.py
+    python OCPP.py [--demo]
 """
 
 import asyncio
+import argparse
 import csv
+import itertools
+import json
 import logging
+import math
 import os
 from datetime import datetime, timezone
 
 import websockets
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as CP
-from ocpp.v16 import call_result
+from ocpp.v16 import call, call_result
 from ocpp.v16.enums import Action, RegistrationStatus, AuthorizationStatus
 
 logging.basicConfig(level=logging.INFO)
@@ -53,9 +57,11 @@ CSV_FIELDS = [
     "id_tag",
     "meter_value",       # Wh (Energieregister, sofern vorhanden)
     "raw_payload",
+    "measurand", "unit", "phase", "sample_timestamp", "requested_limit_a",
 ]
 
 _csv_lock = asyncio.Lock()
+_transaction_ids = itertools.count(int(datetime.now().timestamp()))
 
 
 def _ensure_csv_header():
@@ -81,6 +87,52 @@ async def log_row(**kwargs):
 class WattpilotChargePoint(CP):
     """Repräsentiert die verbundene Wattpilot Flex und verarbeitet alle
     OCPP-1.6-Nachrichten, die sie an das Central System schickt."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.charging = asyncio.Event()
+        self.measurements = asyncio.Queue()
+        self.requested_limit = None
+        self.demo_enabled = False
+
+    async def set_limit(self, limit):
+        profile = {
+            "chargingProfileId": 1, "stackLevel": 0,
+            "chargingProfilePurpose": "TxDefaultProfile", "chargingProfileKind": "Absolute",
+            "chargingSchedule": {"chargingRateUnit": "A", "chargingSchedulePeriod": [
+                {"startPeriod": 0, "limit": limit}]},
+        }
+        # Vor dem Senden loggen, damit auch Timeouts nachvollziehbar bleiben.
+        await log_row(charge_point_id=self.id, message_type="SetChargingProfileRequest",
+                      connector_id=1, requested_limit_a=limit, raw_payload=json.dumps(profile))
+        response = await self.call(call.SetChargingProfile(connector_id=1, cs_charging_profiles=profile))
+        await log_row(charge_point_id=self.id, message_type="SetChargingProfileResponse",
+                      connector_id=1, requested_limit_a=limit, status=response.status)
+        if response.status == "Accepted":
+            self.requested_limit = limit
+        return response
+
+    async def run_demo(self, step_seconds):
+        await self.charging.wait()
+        for limit in (16, 10, 0, 6):
+            while not self.measurements.empty():
+                self.measurements.get_nowait()
+            response = await self.set_limit(limit)
+            if response.status != "Accepted":
+                raise RuntimeError(f"Ladegrenze {limit} A abgelehnt: {response.status}")
+            async def matching_measurement():
+                while True:
+                    values = await self.measurements.get()
+                    offered = values.get(("Current.Offered", None))
+                    if offered is not None and float(offered) == limit:
+                        return values
+            values = await asyncio.wait_for(matching_measurement(), timeout=15)
+            power = values.get(("Power.Active.Import", None), "?")
+            logger.info("DEMO: %s A bestätigt, gemeldete Leistung %s W", limit, power)
+            await log_row(charge_point_id=self.id, message_type="DemoMeasurement",
+                          requested_limit_a=limit, meter_value=power, unit="W")
+            await asyncio.sleep(step_seconds)
+        logger.info("DEMO abgeschlossen: 16 -> 10 -> 0 -> 6 A")
 
     # --- Grundlegende Anmeldung ------------------------------------------------
     @on(Action.boot_notification)
@@ -108,6 +160,8 @@ class WattpilotChargePoint(CP):
     # --- Status / Fehler ---------------------------------------------------
     @on(Action.status_notification)
     async def on_status_notification(self, connector_id, error_code, status, **kwargs):
+        if connector_id == 1 and status == "Charging":
+            self.charging.set()
         logger.info("StatusNotification: connector=%s status=%s error=%s", connector_id, status, error_code)
         await log_row(
             charge_point_id=self.id,
@@ -131,7 +185,7 @@ class WattpilotChargePoint(CP):
 
     @on(Action.start_transaction)
     async def on_start_transaction(self, connector_id, id_tag, meter_start, timestamp, **kwargs):
-        transaction_id = int(datetime.now().timestamp())  # simple eindeutige ID
+        transaction_id = next(_transaction_ids)
         await log_row(
             charge_point_id=self.id,
             message_type="StartTransaction",
@@ -167,9 +221,16 @@ class WattpilotChargePoint(CP):
                     connector_id=connector_id,
                     transaction_id=transaction_id,
                     meter_value=sample.get("value"),
+                    measurand=sample.get("measurand", "Energy.Active.Import.Register"),
+                    unit=sample.get("unit", ""), phase=sample.get("phase", ""), sample_timestamp=ts,
                     raw_payload=f"measurand={sample.get('measurand', 'Energy.Active.Import.Register')}, "
                                  f"unit={sample.get('unit', '')}, phase={sample.get('phase', '')}, ts={ts}",
                 )
+            if self.demo_enabled and connector_id == 1:
+                self.measurements.put_nowait({
+                    (s.get("measurand", "Energy.Active.Import.Register"), s.get("phase")): s["value"]
+                    for s in mv.get("sampled_value", [])
+                })
         return call_result.MeterValues()
 
     # --- Diagnose / Firmware-Meldungen (optional, werden nur geloggt) ------
@@ -184,7 +245,7 @@ class WattpilotChargePoint(CP):
         return call_result.FirmwareStatusNotification()
 
 
-async def on_connect(websocket):
+async def on_connect(websocket, demo=False, step_seconds=5):
     """Wird bei jeder neuen Verbindung aufgerufen und startet die
     Nachrichten-Verarbeitung für diesen Charge Point."""
     # Die Charge-Point-ID steckt im Pfad, z.B. ws://host:9000/WATTPILOT01
@@ -196,25 +257,45 @@ async def on_connect(websocket):
     logger.info("Neue Verbindung von Charge Point '%s' (Subprotokoll: %s)", charge_point_id, requested)
 
     cp = WattpilotChargePoint(charge_point_id, websocket)
+    cp.demo_enabled = demo
+    reader = asyncio.create_task(cp.start())
+    demo_task = asyncio.create_task(cp.run_demo(step_seconds)) if demo else None
     try:
-        await cp.start()
+        if demo_task:
+            done, _ = await asyncio.wait((reader, demo_task), return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        await reader
     except websockets.exceptions.ConnectionClosed:
         logger.info("Verbindung zu '%s' getrennt", charge_point_id)
+    finally:
+        tasks = [reader] + ([demo_task] if demo_task else [])
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--demo", action="store_true", help="Testfolge 16, 10, 0, 6 A senden")
+    parser.add_argument("--step-seconds", type=float, default=5, help="Wartezeit nach bestätigtem Messwert")
+    parser.add_argument("--host", default=HOST)
+    parser.add_argument("--port", type=int, default=PORT)
+    args = parser.parse_args()
+    if not math.isfinite(args.step_seconds) or args.step_seconds <= 0:
+        parser.error("Schrittdauer muss endlich und positiv sein.")
     _ensure_csv_header()
-    logger.info("Starte OCPP-Server auf %s:%s ...", HOST, PORT)
+    logger.info("Starte OCPP-Server auf %s:%s ...", args.host, args.port)
     logger.info("CSV-Datei: %s", CSV_FILE)
     logger.info(
         "Trage in der Wattpilot-App/Weboberfläche als OCPP-Backend ein: "
-        "ws://<IP-dieses-Rechners>:%s/<CHARGEPOINT-ID>", PORT
+        "ws://<IP-dieses-Rechners>:%s/<CHARGEPOINT-ID>", args.port
     )
 
     async with websockets.serve(
-        on_connect,
-        HOST,
-        PORT,
+        lambda ws: on_connect(ws, args.demo, args.step_seconds),
+        args.host,
+        args.port,
         subprotocols=["ocpp1.6"],
     ):
         await asyncio.Future()  # läuft für immer

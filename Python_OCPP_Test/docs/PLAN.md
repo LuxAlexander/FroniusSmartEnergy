@@ -1,5 +1,11 @@
 # Plan: OCPP-Daten vom Client über den Server zu OpenEMS
 
+> Aktualisierung 19.11.2026: Die folgende Planung enthält ältere Ist-Angaben.
+> Der Client nutzt inzwischen `ocpp`, sendet Status, Transaktionen und Messwerte
+> und verarbeitet einfache Ladeprofile. Der Server besitzt eine optionale Demo
+> mit 16/10/0/6 A und strukturierte CSV-Messfelder. Aktueller Stand und Start:
+> [README](../README.md). OpenEMS und PV sind weiterhin nicht angebunden.
+
 ## 1. Ist-Zustand
 
 | Datei | Rolle | Was sie tut |

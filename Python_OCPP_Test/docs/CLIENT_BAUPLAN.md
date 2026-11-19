@@ -1,5 +1,13 @@
 # Bauplan: Wattpilot-Simulator (`client.py`) und PV-Regel im Server
 
+> Stand 19.11.2026: Der erste Steuerungsschritt ist implementiert, siehe
+> [README](../README.md). Der Simulator unterstützt bewusst nur ein einfaches
+> TxDefaultProfile in A mit 0 oder 6–16 A und lehnt weitere Profile ab.
+> Profiländerungen melden sich sofort als Messwerte; Pausen liefern exakt 0 W.
+> Die PV-Regel dieses Bauplans und ClearChargingProfile sind noch nicht umgesetzt.
+> Die folgenden Abschnitte bleiben Planungsunterlagen, keine Beschreibung
+> durchgehend implementierter oder am echten Gerät bestätigter Funktionen.
+
 Ziel: `client.py` verhält sich nach außen wie die echte Fronius Wattpilot Flex. Der Server berechnet aus der PV-Leistung ein Ladelimit und schickt es per OCPP an die Wallbox. Später wird der Client durch die echte Wattpilot ersetzt, **ohne dass sich am Server etwas ändert**.
 
 Leitplanken:
