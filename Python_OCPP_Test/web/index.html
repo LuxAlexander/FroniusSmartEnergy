@@ -1,0 +1,265 @@
+<!doctype html>
+<!--
+  Eigene Weboberfläche für OpenEMS Edge (Wallbox, PV, Netz).
+  Holt alle Daten über die Websocket-Schnittstelle von OpenEMS (ws://<host>:8075, JSON-RPC).
+  Öffnen: Datei im Browser öffnen, OpenEMS muss laufen.
+  Stand: Funktionen der OpenEMS-UI für diesen Aufbau (Live, Ladestation steuern, Verlauf).
+-->
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wattpilot Energiemonitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --text:#1d2330; --muted:#6b7280; --line:#e2e5ea;
+          --pv:#e8a400; --grid:#5b6b80; --load:#2f7dd1; --evcs:#2a9d6a; --bad:#c43c3c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 16px; background:var(--card); border-bottom:1px solid var(--line); }
+  header h1 { font-size:18px; margin:0 auto 0 0; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  h2 { font-size:16px; margin:0 0 12px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit, minmax(150px, 1fr)); gap:12px; }
+  .tile { border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .tile .k { color:var(--muted); font-size:13px; }
+  .tile .v { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .flow { display:grid; grid-template-columns:1fr auto 1fr auto 1fr; gap:8px; align-items:center; text-align:center; }
+  .node { border:2px solid; border-radius:10px; padding:10px; }
+  .node .v { font-size:20px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .arrow { font-size:26px; color:var(--muted); }
+  .pv { border-color:var(--pv); } .grid { border-color:var(--grid); } .load { border-color:var(--load); } .evcs { border-color:var(--evcs); }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; background:var(--bad); margin-right:6px; }
+  .dot.on { background:var(--evcs); }
+  label { display:flex; flex-direction:column; gap:4px; font-size:13px; color:var(--muted); }
+  input, select, button { font:inherit; padding:6px 8px; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--text); }
+  button { cursor:pointer; background:var(--load); color:#fff; border-color:var(--load); }
+  button.flat { background:#fff; color:var(--text); border-color:var(--line); }
+  .muted { color:var(--muted); font-size:13px; }
+  .chart { position:relative; height:320px; }
+  @media (max-width:640px) { .flow { grid-template-columns:1fr; } .arrow { transform:rotate(90deg); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Wattpilot Energiemonitor</h1>
+  <span><span id="dot" class="dot"></span><span id="conn">getrennt</span></span>
+  <input id="host" value="localhost:8075" size="14" title="OpenEMS-Websocket">
+  <input id="pw" type="password" value="owner" size="8" title="Passwort (owner darf Einstellungen ändern)">
+  <button id="connect">Verbinden</button>
+</header>
+
+<main>
+  <section>
+    <h2>Energiefluss (live)</h2>
+    <div class="flow">
+      <div class="node pv"><div class="muted">PV-Erzeugung</div><div class="v" id="f-pv">–</div></div>
+      <div class="arrow">→</div>
+      <div class="node load"><div class="muted">Verbrauch</div><div class="v" id="f-load">–</div>
+        <div class="muted" id="f-evcs">Wallbox –</div></div>
+      <div class="arrow" id="f-garrow">←</div>
+      <div class="node grid"><div class="muted" id="f-gk">Netz</div><div class="v" id="f-grid">–</div></div>
+    </div>
+    <div class="tiles" style="margin-top:12px">
+      <div class="tile"><div class="k">Autarkie</div><div class="v" id="t-aut">–</div></div>
+      <div class="tile"><div class="k">Eigenverbrauch</div><div class="v" id="t-self">–</div></div>
+      <div class="tile"><div class="k">System-Zustand</div><div class="v" id="t-state">–</div></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Ladestation</h2>
+    <div class="tiles">
+      <div class="tile"><div class="k">Status</div><div class="v" id="e-status">–</div></div>
+      <div class="tile"><div class="k">Ladeleistung</div><div class="v" id="e-power">–</div></div>
+      <div class="tile"><div class="k">Vorgabe OpenEMS</div><div class="v" id="e-limit">–</div></div>
+      <div class="tile"><div class="k">Strom L1 / L2 / L3</div><div class="v" id="e-cur">–</div></div>
+      <div class="tile"><div class="k">Phasen</div><div class="v" id="e-phases">–</div></div>
+      <div class="tile"><div class="k">Energie dieser Ladung</div><div class="v" id="e-session">–</div></div>
+    </div>
+    <p class="muted" id="e-comm"></p>
+    <h2 style="margin-top:16px">Ladung steuern</h2>
+    <div class="row">
+      <label>Laden erlaubt<select id="c-enabled"><option value="true">ja</option><option value="false">nein</option></select></label>
+      <label>Lademodus<select id="c-mode"><option value="EXCESS_POWER">PV-Überschuss</option><option value="FORCE_CHARGE">Erzwungen</option></select></label>
+      <label>Mindestleistung Überschuss [W]<input id="c-min" type="number" step="10" min="0"></label>
+      <label>Leistung erzwungen [W je Phase]<input id="c-force" type="number" step="10" min="0"></label>
+      <label>Energielimit je Ladung [Wh, 0 = aus]<input id="c-limit" type="number" step="100" min="0"></label>
+      <button id="c-save">Übernehmen</button>
+    </div>
+    <p class="muted" id="c-msg"></p>
+  </section>
+
+  <section>
+    <h2>Verlauf</h2>
+    <div class="row">
+      <label>von<input id="h-from" type="date"></label>
+      <label>bis<input id="h-to" type="date"></label>
+      <button class="flat" id="h-prev">‹ Tag</button>
+      <button class="flat" id="h-next">Tag ›</button>
+      <button id="h-load">Laden</button>
+    </div>
+    <div class="chart" style="margin-top:12px"><canvas id="h-chart"></canvas></div>
+    <div class="tiles" style="margin-top:12px">
+      <div class="tile"><div class="k">PV-Erzeugung</div><div class="v" id="s-pv">–</div></div>
+      <div class="tile"><div class="k">Netzbezug</div><div class="v" id="s-buy">–</div></div>
+      <div class="tile"><div class="k">Einspeisung</div><div class="v" id="s-sell">–</div></div>
+      <div class="tile"><div class="k">Verbrauch</div><div class="v" id="s-load">–</div></div>
+      <div class="tile"><div class="k">Wallbox</div><div class="v" id="s-evcs">–</div></div>
+      <div class="tile"><div class="k">Autarkie</div><div class="v" id="s-aut">–</div></div>
+      <div class="tile"><div class="k">Eigenverbrauch</div><div class="v" id="s-self">–</div></div>
+    </div>
+    <p class="muted">Energiewerte aus den gespeicherten Leistungsverläufen berechnet.</p>
+  </section>
+</main>
+
+<script>
+// ---------------------------------------------------------------------------
+// Verbindung zu OpenEMS Edge: JSON-RPC über Websocket. Anfragen an die Edge
+// werden in "edgeRpc" verpackt; Live-Werte kommen als "currentData"-Benachrichtigung.
+// ---------------------------------------------------------------------------
+const EDGE = "0", EVCS = "evcs0", CTRL = "ctrlEvcs0";
+const LIVE = ["_sum/State", "_sum/ProductionActivePower", "_sum/GridActivePower", "_sum/ConsumptionActivePower",
+  `${EVCS}/Status`, `${EVCS}/ActivePower`, `${EVCS}/SetChargePowerLimit`, `${EVCS}/Phases`, `${EVCS}/EnergySession`,
+  `${EVCS}/CurrentL1`, `${EVCS}/CurrentL2`, `${EVCS}/CurrentL3`, `${EVCS}/ChargingstationCommunicationFailed`,
+  `${CTRL}/_PropertyEnabledCharging`, `${CTRL}/_PropertyChargeMode`, `${CTRL}/_PropertyDefaultChargeMinPower`,
+  `${CTRL}/_PropertyForceChargeMinPower`, `${CTRL}/_PropertyEnergySessionLimit`];
+const HISTORY = ["_sum/ProductionActivePower", "_sum/GridActivePower", "_sum/ConsumptionActivePower", `${EVCS}/ActivePower`];
+const STATUS = { "-1": "unbekannt", 0: "startet", 1: "kein Auto", 2: "bereit", 3: "lädt", 4: "Fehler",
+  5: "abgelehnt", 6: "Energielimit erreicht", 7: "fertig" };
+
+let ws, pending = {}, live = {}, chart, configShown = false;
+const $ = id => document.getElementById(id);
+const W = v => v == null ? "–" : Math.abs(v) >= 1000 ? (v / 1000).toFixed(2) + " kW" : Math.round(v) + " W";
+const kWh = v => v == null ? "–" : (v / 1000).toFixed(2) + " kWh";
+const pct = v => v == null ? "–" : Math.round(v) + " %";
+const uuid = () => crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2);
+
+function rpc(method, params) {
+  return new Promise((resolve, reject) => {
+    const id = uuid();
+    pending[id] = { resolve, reject };
+    ws.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+  });
+}
+async function edgeRpc(method, params) {
+  const res = await rpc("edgeRpc", { edgeId: EDGE, payload: { jsonrpc: "2.0", id: uuid(), method, params } });
+  return res.payload.result;
+}
+
+function connect() {
+  if (ws) ws.close();
+  ws = new WebSocket("ws://" + $("host").value);
+  ws.onopen = async () => {
+    try {
+      await rpc("authenticateWithPassword", { password: $("pw").value });
+      setConn(true, "verbunden");
+      await edgeRpc("subscribeChannels", { count: 0, channels: LIVE });
+      loadHistory();
+    } catch (e) { setConn(false, "Anmeldung fehlgeschlagen"); }
+  };
+  ws.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.id && pending[msg.id]) {                           // Antwort auf eine eigene Anfrage
+      const p = pending[msg.id]; delete pending[msg.id];
+      msg.error ? p.reject(msg.error) : p.resolve(msg.result);
+    } else if (msg.method === "edgeRpc" && msg.params.payload.method === "currentData") {
+      Object.assign(live, msg.params.payload.params);
+      showLive();
+    }
+  };
+  ws.onclose = () => { setConn(false, "getrennt – neuer Versuch in 5 s"); setTimeout(() => ws.readyState === 3 && connect(), 5000); };
+}
+function setConn(on, text) { $("dot").className = on ? "dot on" : "dot"; $("conn").textContent = text; }
+
+// --- Live-Anzeige ----------------------------------------------------------
+function autarky(buy, load) { return load > 0 ? Math.max(0, Math.min(100, (1 - buy / load) * 100)) : null; }
+function selfConsumption(sell, pv) { return pv > 0 ? Math.max(0, Math.min(100, (1 - sell / pv) * 100)) : null; }
+
+function showLive() {
+  const g = live["_sum/GridActivePower"], pv = live["_sum/ProductionActivePower"], load = live["_sum/ConsumptionActivePower"];
+  $("f-pv").textContent = W(pv);
+  $("f-load").textContent = W(load);
+  $("f-evcs").textContent = "davon Wallbox " + W(live[`${EVCS}/ActivePower`]);
+  $("f-grid").textContent = W(g == null ? null : Math.abs(g));
+  $("f-gk").textContent = g < 0 ? "Netz (Einspeisung)" : "Netz (Bezug)";
+  $("f-garrow").textContent = g < 0 ? "→" : "←";
+  $("t-aut").textContent = pct(autarky(Math.max(g, 0), load));
+  $("t-self").textContent = pct(selfConsumption(Math.max(-g, 0), pv));
+  $("t-state").textContent = ["OK", "Info", "Warnung", "Fehler"][live["_sum/State"]] ?? "–";
+
+  $("e-status").textContent = STATUS[live[`${EVCS}/Status`]] ?? "–";
+  $("e-power").textContent = W(live[`${EVCS}/ActivePower`]);
+  $("e-limit").textContent = W(live[`${EVCS}/SetChargePowerLimit`]);
+  $("e-cur").textContent = [1, 2, 3].map(n => ((live[`${EVCS}/CurrentL${n}`] ?? 0) / 1000).toFixed(1)).join(" / ") + " A";
+  $("e-phases").textContent = live[`${EVCS}/Phases`] ?? "–";
+  $("e-session").textContent = kWh(live[`${EVCS}/EnergySession`]);
+  $("e-comm").textContent = live[`${EVCS}/ChargingstationCommunicationFailed`] ? "⚠ Keine Verbindung zur Ladestation (OCPP-Server läuft?)" : "";
+
+  if (!configShown && live[`${CTRL}/_PropertyChargeMode`] != null) {   // Formular einmalig mit aktuellen Werten füllen
+    configShown = true;
+    $("c-enabled").value = String(live[`${CTRL}/_PropertyEnabledCharging`] == 1);
+    $("c-mode").value = live[`${CTRL}/_PropertyChargeMode`];
+    $("c-min").value = live[`${CTRL}/_PropertyDefaultChargeMinPower`];
+    $("c-force").value = live[`${CTRL}/_PropertyForceChargeMinPower`];
+    $("c-limit").value = live[`${CTRL}/_PropertyEnergySessionLimit`];
+  }
+}
+
+// --- Ladung steuern: Konfiguration des Controllers ctrlEvcs0 ändern --------
+$("c-save").onclick = async () => {
+  try {
+    await edgeRpc("updateComponentConfig", { componentId: CTRL, properties: [
+      { name: "enabledCharging", value: $("c-enabled").value === "true" },
+      { name: "chargeMode", value: $("c-mode").value },
+      { name: "defaultChargeMinPower", value: Number($("c-min").value) },
+      { name: "forceChargeMinPower", value: Number($("c-force").value) },
+      { name: "energySessionLimit", value: Number($("c-limit").value) }] });
+    $("c-msg").textContent = "Übernommen " + new Date().toLocaleTimeString();
+  } catch (e) { $("c-msg").textContent = "Fehler: " + (e.message || JSON.stringify(e)); }
+};
+
+// --- Verlauf -----------------------------------------------------------------
+const iso = d => d.toLocaleDateString("sv");                   // YYYY-MM-DD in Ortszeit
+function shiftDays(n) {
+  for (const id of ["h-from", "h-to"]) { const d = new Date($(id).value); d.setDate(d.getDate() + n); $(id).value = iso(d); }
+  loadHistory();
+}
+$("h-prev").onclick = () => shiftDays(-1);
+$("h-next").onclick = () => shiftDays(1);
+$("h-load").onclick = () => loadHistory();
+
+async function loadHistory() {
+  const r = await edgeRpc("queryHistoricTimeseriesData", { fromDate: $("h-from").value, toDate: $("h-to").value,
+    channels: HISTORY, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
+  const t = r.timestamps.map(s => new Date(s)), d = r.data;
+  const multiDay = $("h-from").value !== $("h-to").value;
+  const labels = t.map(x => multiDay ? x.toLocaleString("de", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+                                     : x.toLocaleTimeString("de", { hour: "2-digit", minute: "2-digit" }));
+  const series = [["PV", HISTORY[0], "--pv"], ["Netz", HISTORY[1], "--grid"], ["Verbrauch", HISTORY[2], "--load"], ["Wallbox", HISTORY[3], "--evcs"]];
+  const css = getComputedStyle(document.documentElement);
+  if (chart) chart.destroy();
+  chart = new Chart($("h-chart"), { type: "line",
+    data: { labels, datasets: series.map(([label, ch, c]) => ({ label, data: d[ch], borderColor: css.getPropertyValue(c),
+      backgroundColor: css.getPropertyValue(c), pointRadius: 0, borderWidth: 2, spanGaps: false })) },
+    options: { maintainAspectRatio: false, animation: false, interaction: { mode: "index", intersect: false },
+      scales: { y: { title: { display: true, text: "Leistung [W]" } }, x: { ticks: { maxTicksLimit: 12 } } } } });
+
+  // Energie [Wh] = Summe Leistung × Zeitschritt
+  const energy = (ch, f = v => v) => d[ch].reduce((sum, v, i) =>
+    v == null || i === 0 ? sum : sum + f(v) * (t[i] - t[i - 1]) / 3.6e6, 0);
+  const pv = energy(HISTORY[0]), buy = energy(HISTORY[1], v => Math.max(v, 0)), sell = energy(HISTORY[1], v => Math.max(-v, 0));
+  const load = energy(HISTORY[2]);
+  $("s-pv").textContent = kWh(pv); $("s-buy").textContent = kWh(buy); $("s-sell").textContent = kWh(sell);
+  $("s-load").textContent = kWh(load); $("s-evcs").textContent = kWh(energy(HISTORY[3]));
+  $("s-aut").textContent = pct(autarky(buy, load)); $("s-self").textContent = pct(selfConsumption(sell, pv));
+}
+
+$("h-from").value = $("h-to").value = iso(new Date());
+$("connect").onclick = connect;
+connect();
+</script>
+</body>
+</html>
