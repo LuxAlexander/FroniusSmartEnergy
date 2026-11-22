@@ -29,8 +29,9 @@ from urllib.parse import unquote
 import websockets
 from ocpp.routing import on
 from ocpp.v16 import ChargePoint as CP
-from ocpp.v16 import call_result
-from ocpp.v16.enums import Action, RegistrationStatus, AuthorizationStatus
+from ocpp.v16 import call, call_result
+from ocpp.v16.enums import (Action, AuthorizationStatus, ChargingProfileKindType,
+                            ChargingProfilePurposeType, ChargingRateUnitType, RegistrationStatus)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("wattpilot-ocpp")
@@ -126,17 +127,65 @@ def goe_status():
             "dws": str(round(max(0.0, s["energy"] - s["meter_start"]) * 360)), "nrg": nrg}
 
 
+# ---------------------------------------------------------------------------
+# Steuerung OpenEMS -> Wallbox: go-e-Befehl (amp/alw) -> SetChargingProfile
+# ---------------------------------------------------------------------------
+CHARGE_POINTS = {}                       # verbundene Wallboxen: ID -> WattpilotChargePoint
+GOE_CMD = {}                             # zuletzt von OpenEMS gesetzte Werte, z.B. {"amp": "10"}
+LAST_LIMIT = None                        # zuletzt an die Wallbox gesendetes Limit (A)
+
+
+def tx_default_profile(limit_a):
+    return {"charging_profile_id": 1, "stack_level": 0,
+            "charging_profile_purpose": ChargingProfilePurposeType.tx_default_profile,
+            "charging_profile_kind": ChargingProfileKindType.absolute,
+            "charging_schedule": {"charging_rate_unit": ChargingRateUnitType.amps,
+                                  "charging_schedule_period": [{"start_period": 0, "limit": limit_a}]}}
+
+
+async def send_limit(limit_a):
+    """Schickt das Limit als TxDefaultProfile an alle verbundenen Wallboxen."""
+    for cp in list(CHARGE_POINTS.values()):
+        try:
+            res = await cp.call(call.SetChargingProfile(
+                connector_id=1, cs_charging_profiles=tx_default_profile(limit_a)))
+            status = res.status
+        except Exception as e:                           # Timeout, Verbindung weg, ...
+            status = f"Fehler: {e!r}"
+        logger.info("SetChargingProfile %s A an '%s': %s", limit_a, cp.id, status)
+        await log_row(charge_point_id=cp.id, message_type="SetChargingProfile",
+                      meter_value=limit_a, status=status)
+
+
+async def handle_goe_command(path):
+    """'/mqtt?payload=amp=10' bzw. 'alw=0' auswerten; nur bei geändertem Limit senden."""
+    global LAST_LIMIT
+    key, _, value = path.partition("payload=")[2].partition("=")
+    if GOE_CMD.get(key) == value:
+        return                                           # nichts Neues
+    GOE_CMD[key] = value
+    logger.info("Befehl von OpenEMS: %s=%s", key, value)
+    await log_row(charge_point_id="openems", message_type="OpenEMS-Befehl", raw_payload=path)
+    if GOE_CMD.get("alw") == "0":
+        limit = 0.0                                      # Laden gesperrt -> Pause
+    elif "amp" in GOE_CMD:
+        limit = float(GOE_CMD["amp"])
+    else:
+        return
+    if limit != LAST_LIMIT:
+        LAST_LIMIT = limit
+        asyncio.create_task(send_limit(limit))           # HTTP-Antwort nicht blockieren
+
+
 async def goe_http(reader, writer):
     """Minimaler HTTP-Server: jede Anfrage bekommt den aktuellen Status.
-    Befehle von OpenEMS (/mqtt?payload=amp=10) werden geloggt, aber noch nicht
-    an die Wallbox weitergegeben (Phase D)."""
+    Befehle von OpenEMS (/mqtt?payload=amp=10) gehen als Ladeprofil an die Wallbox."""
     request = (await reader.readline()).decode(errors="ignore").split()
     while (await reader.readline()) not in (b"\r\n", b"\n", b""):
         pass                                             # Header überspringen
     path = unquote(request[1]) if len(request) > 1 else "/"
     if path.startswith("/mqtt"):
-        logger.info("Befehl von OpenEMS: %s", path)
-        await log_row(charge_point_id="openems", message_type="OpenEMS-Befehl", raw_payload=path)
+        await handle_goe_command(path)
     body = json.dumps(goe_status()).encode()
     writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
                  b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
@@ -268,10 +317,13 @@ async def on_connect(websocket):
     logger.info("Neue Verbindung von Charge Point '%s' (Subprotokoll: %s)", charge_point_id, requested)
 
     cp = WattpilotChargePoint(charge_point_id, websocket)
+    CHARGE_POINTS[charge_point_id] = cp
     try:
         await cp.start()
     except websockets.exceptions.ConnectionClosed:
         logger.info("Verbindung zu '%s' getrennt", charge_point_id)
+    finally:
+        CHARGE_POINTS.pop(charge_point_id, None)
 
 
 async def main():
