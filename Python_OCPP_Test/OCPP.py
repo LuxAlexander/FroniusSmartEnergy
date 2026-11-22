@@ -29,10 +29,12 @@ import os
 from datetime import datetime, timezone
 
 import websockets
-from ocpp.routing import on
+from ocpp.routing import on, after
+from ocpp.exceptions import OCPPError
 from ocpp.v16 import ChargePoint as CP
 from ocpp.v16 import call, call_result
 from ocpp.v16.enums import Action, RegistrationStatus, AuthorizationStatus
+from dashboard import Monitor, ObservedConnection, start_dashboard
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("wattpilot-ocpp")
@@ -62,6 +64,7 @@ CSV_FIELDS = [
 
 _csv_lock = asyncio.Lock()
 _transaction_ids = itertools.count(int(datetime.now().timestamp()))
+monitor = Monitor()
 
 
 def _ensure_csv_header():
@@ -94,6 +97,29 @@ class WattpilotChargePoint(CP):
         self.measurements = asyncio.Queue()
         self.requested_limit = None
         self.demo_enabled = False
+        self.booted = asyncio.Event()
+
+    @after(Action.boot_notification)
+    def after_boot(self, **kwargs):
+        # Only query after the Accepted boot response has been sent.
+        self.booted.set()
+
+    async def read_configuration(self, timeout=10):
+        await self.booted.wait()
+        monitor.configuration(self.id, status="loading", requested_at=datetime.now(timezone.utc).isoformat(),
+                              keys=[], unknown_keys=[], error=None, received_at=None)
+        try:
+            response = await asyncio.wait_for(self.call(call.GetConfiguration(), suppress=False), timeout)
+            monitor.configuration(self.id, status="ready", keys=response.configuration_key or [],
+                                  unknown_keys=response.unknown_key or [],
+                                  received_at=datetime.now(timezone.utc).isoformat())
+        except asyncio.TimeoutError:
+            monitor.configuration(self.id, status="error", error=f"No configuration response within {timeout:g} seconds.")
+        except OCPPError as exc:
+            status = "unsupported" if exc.code in ("NotImplemented", "NotSupported") else "error"
+            monitor.configuration(self.id, status=status, error=f"{exc.code}: {exc.description}")
+        except Exception as exc:
+            monitor.configuration(self.id, status="error", error=f"Configuration could not be read: {exc}")
 
     async def set_limit(self, limit):
         profile = {
@@ -256,9 +282,12 @@ async def on_connect(websocket, demo=False, step_seconds=5):
     requested = websocket.request.headers.get("Sec-WebSocket-Protocol", "") if hasattr(websocket, "request") else ""
     logger.info("Neue Verbindung von Charge Point '%s' (Subprotokoll: %s)", charge_point_id, requested)
 
-    cp = WattpilotChargePoint(charge_point_id, websocket)
+    token = object()
+    monitor.connect(charge_point_id, token)
+    cp = WattpilotChargePoint(charge_point_id, ObservedConnection(websocket, charge_point_id, monitor))
     cp.demo_enabled = demo
     reader = asyncio.create_task(cp.start())
+    configuration_task = asyncio.create_task(cp.read_configuration())
     demo_task = asyncio.create_task(cp.run_demo(step_seconds)) if demo else None
     try:
         if demo_task:
@@ -269,7 +298,8 @@ async def on_connect(websocket, demo=False, step_seconds=5):
     except websockets.exceptions.ConnectionClosed:
         logger.info("Verbindung zu '%s' getrennt", charge_point_id)
     finally:
-        tasks = [reader] + ([demo_task] if demo_task else [])
+        monitor.disconnect(charge_point_id, token)
+        tasks = [reader, configuration_task] + ([demo_task] if demo_task else [])
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -281,6 +311,9 @@ async def main():
     parser.add_argument("--step-seconds", type=float, default=5, help="Wartezeit nach bestätigtem Messwert")
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--web-host", default="127.0.0.1", help="Dashboard-Adresse (Standard: nur dieser Rechner)")
+    parser.add_argument("--web-port", type=int, default=8080)
+    parser.add_argument("--no-web", action="store_true", help="Dashboard nicht starten")
     args = parser.parse_args()
     if not math.isfinite(args.step_seconds) or args.step_seconds <= 0:
         parser.error("Schrittdauer muss endlich und positiv sein.")
@@ -292,13 +325,20 @@ async def main():
         "ws://<IP-dieses-Rechners>:%s/<CHARGEPOINT-ID>", args.port
     )
 
-    async with websockets.serve(
-        lambda ws: on_connect(ws, args.demo, args.step_seconds),
-        args.host,
-        args.port,
-        subprotocols=["ocpp1.6"],
-    ):
-        await asyncio.Future()  # läuft für immer
+    http = None
+    try:
+        async with websockets.serve(
+            lambda ws: on_connect(ws, args.demo, args.step_seconds),
+            args.host, args.port, subprotocols=["ocpp1.6"],
+        ):
+            if not args.no_web:
+                http = start_dashboard(monitor, args.web_host, args.web_port)
+                logger.info("OCPP-Dashboard: http://%s:%s", args.web_host, http.server_port)
+            await asyncio.Future()  # läuft für immer
+    finally:
+        if http:
+            await asyncio.to_thread(http.shutdown)
+            http.server_close()
 
 
 if __name__ == "__main__":

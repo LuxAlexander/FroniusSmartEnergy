@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Charge Observatory · OCPP Monitor</title>
+  <link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script>
+</head>
+<body>
+  <header><a class="brand" href="/"><span class="brand-icon">ϟ</span><span>Charge Observatory<small>OCPP 1.6J · Live monitor</small></span></a>
+    <div class="header-actions"><span id="feed" role="status">Connecting to server…</span><button id="export">Export snapshot</button></div>
+  </header>
+  <main>
+    <section class="intro"><div><p class="eyebrow">ENERGY LAB / CHARGING INFRASTRUCTURE</p><h1>Your charging session,<br><span>in plain sight.</span></h1><p class="subtitle">Live measurements and the messages behind them.</p></div>
+      <div class="selector"><label for="device">Charge point</label><select id="device"><option value="">No charge points yet</option></select><label for="connector">Connector</label><select id="connector"><option value="1">Connector 1</option></select></div>
+    </section>
+    <div id="connection" class="connection" role="status">Waiting for a wallbox or simulator to connect. This view sends no charging commands.</div>
+    <section class="metrics" aria-label="Charging overview">
+      <article class="metric"><p>Charging power</p><strong id="power">—</strong><small id="power-note">No measurement received</small></article>
+      <article class="metric"><p>Session energy</p><strong id="energy">—</strong><small id="energy-note">No session recorded</small></article>
+      <article class="metric"><p>Offered current</p><strong id="offered">—</strong><small>Reported by the charge point</small></article>
+      <article class="metric"><p>Connector status</p><strong id="status" class="status-value">—</strong><small id="error">No status received</small></article>
+    </section>
+    <section class="middle">
+      <article class="panel chart-panel"><div class="panel-heading"><div><p class="eyebrow">RECENT MEASUREMENTS</p><h2>Charging power</h2></div><span class="legend"><i></i> Actual · kW</span></div>
+        <div id="chart-empty" class="chart-empty">The power trace will appear when measurements arrive.</div><svg id="chart" viewBox="0 0 800 210" role="img" aria-label="Charging power over measurement time"></svg><div class="chart-labels"><span id="chart-start">—</span><span id="chart-end">—</span></div>
+      </article>
+      <article class="panel"><div class="panel-heading"><div><p class="eyebrow">PHASE BREAKDOWN</p><h2>At the connector</h2></div></div><div id="phases" class="phases"></div><p class="muted">Missing phases stay blank. Values are not inferred from totals.</p></article>
+    </section>
+    <section class="panel"><div class="panel-heading"><div><p class="eyebrow">ALL REPORTED VALUES</p><h2>Measurement register</h2></div><span id="measurement-age" class="muted">No data yet</span></div>
+      <div class="table-scroll"><table><thead><tr><th>Measurand</th><th>Phase</th><th>Value</th><th>Unit</th><th>Context / location</th><th>Sample time</th><th>Received</th></tr></thead><tbody id="samples"></tbody></table></div>
+    </section>
+    <section class="panel" aria-labelledby="capabilities-title">
+      <div class="panel-heading"><div><p class="eyebrow">DEVICE DISCOVERY</p><h2 id="capabilities-title">Device capabilities</h2></div><span class="muted">GetConfiguration · read only</span></div>
+      <p id="capabilities-status" class="muted" role="status">Connect a charge point to read its configuration.</p>
+      <div id="capability-summary" class="counts"></div>
+      <div class="table-scroll"><table><thead><tr><th>Configuration key</th><th>Reported value</th><th>Device access</th></tr></thead><tbody id="configuration-keys"></tbody></table></div>
+      <p id="unknown-keys" class="muted"></p>
+      <p class="muted">Read automatically once after registration. Reported features are not a guarantee that every command works. No settings are changed.</p>
+    </section>
+    <section class="middle details-grid">
+      <article class="panel"><div class="panel-heading"><div><p class="eyebrow">DEVICE & CONNECTION</p><h2>Charge point details</h2></div></div><dl id="details"></dl></article>
+      <article class="panel"><div class="panel-heading"><div><p class="eyebrow">TRANSACTIONS</p><h2>Sessions this server run</h2></div></div><div id="sessions"></div></article>
+    </section>
+    <section class="panel"><div class="panel-heading event-heading"><div><p class="eyebrow">PROTOCOL EXPLORER</p><h2>OCPP message stream</h2></div><div class="filters"><label class="sr-only" for="search">Search messages</label><input id="search" placeholder="Search action, ID or payload…" type="search"><label class="sr-only" for="direction">Message direction</label><select id="direction"><option value="">Both directions</option><option value="in">Wallbox → server</option><option value="out">Server → wallbox</option></select></div></div>
+      <div id="counts" class="counts"></div><div id="events" class="events"></div>
+    </section>
+    <footer><span>Read-only · Refreshes every 2 seconds · Times shown in your browser’s local timezone</span><span id="retention">Memory only · Resets on server restart</span></footer>
+  </main>
+</body>
+</html>

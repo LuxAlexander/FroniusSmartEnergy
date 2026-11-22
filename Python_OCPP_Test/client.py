@@ -51,6 +51,25 @@ class Wallbox(ChargePoint):
         self.changed = asyncio.Event()
         self.last_measurement = time.monotonic()
         self.active = False
+        self.tick_seconds = TICK
+
+    @on(Action.get_configuration)
+    async def on_get_configuration(self, key=None, **kwargs):
+        """Describe this small simulator model, not the real Wattpilot's capabilities."""
+        values = {
+            "NumberOfConnectors": "1",
+            "SupportedFeatureProfiles": "Core,SmartCharging",
+            "HeartbeatInterval": f"{self.tick_seconds:g}",
+            "MeterValueSampleInterval": f"{self.tick_seconds * 2:g}",
+            "MeterValuesSampledData": "Current.Import,Current.Offered,Energy.Active.Import.Register,Frequency,Power.Active.Import,Power.Offered",
+            "ChargingScheduleAllowedChargingRateUnit": "A",
+            "ChargingScheduleMaxPeriods": "1", "ChargeProfileMaxStackLevel": "0",
+            "MaxChargingProfilesInstalled": "1", "GetConfigurationMaxKeys": "50",
+        }
+        requested = key or list(values)
+        return call_result.GetConfiguration(
+            configuration_key=[{"key": k, "readonly": True, "value": values[k]} for k in requested if k in values],
+            unknown_key=[k for k in requested if k not in values])
 
     def advance_energy(self):
         now_s = time.monotonic()
@@ -112,6 +131,7 @@ class Wallbox(ChargePoint):
 
 
 async def simulate(cp, minutes=15, tick_seconds=TICK):
+    cp.tick_seconds = tick_seconds
     res = await cp.call(call.BootNotification(
         charge_point_vendor="fronius", charge_point_model="wattpilot_flex_c6",
         charge_point_serial_number="SIM0001", firmware_version="sim"))
