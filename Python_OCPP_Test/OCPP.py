@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from urllib.parse import unquote
 
 import websockets
-from ocpp.routing import on
+from ocpp.routing import after, on
 from ocpp.v16 import ChargePoint as CP
 from ocpp.v16 import call, call_result
 from ocpp.v16.enums import (Action, AuthorizationStatus, ChargingProfileKindType,
@@ -118,10 +118,12 @@ def goe_status():
     """STATE als go-e-API-v1-JSON (Einzelwerte als Strings wie beim echten go-e)."""
     s = STATE
     volt = [round(p / i) if i > 1 else 230 for p, i in zip(s["power"], s["current"])]
-    pha = 0b111 | sum(8 << n for n, i in enumerate(s["current"]) if i > 1)  # Bit 3-5: aktive Phasen
+    # Bit 3-5: aktive Phasen. Ohne Laden 1 Phase melden, sonst rechnet OpenEMS
+    # dreiphasig (Mindestleistung 4140 W statt 1380 W) und gibt nie frei.
+    pha = 0b111 | (sum(8 << n for n, i in enumerate(s["current"]) if i > 1) or 8)
     nrg = volt + [0] + [round(i * 10) for i in s["current"]] \
         + [round(p / 100) for p in s["power"]] + [0, round(s["power_sum"] / 10), 0, 0, 0, 0]
-    return {"version": "B", "fwv": "sim", "sse": "ocpp", "err": "0", "alw": "1", "cbl": "0",
+    return {"version": "B", "fwv": "sim", "sse": "ocpp", "err": "0", "alw": GOE_CMD.get("alw", "1"), "cbl": "0",
             "car": str(GOE_CAR.get(s["status"], 1)), "amp": str(round(s["offered"])),
             "pha": str(pha), "eto": str(round(s["energy"] / 100)),
             "dws": str(round(max(0.0, s["energy"] - s["meter_start"]) * 360)), "nrg": nrg}
@@ -214,6 +216,11 @@ class WattpilotChargePoint(CP):
             interval=30,  # Heartbeat-Intervall in Sekunden
             status=RegistrationStatus.accepted,
         )
+
+    @after(Action.boot_notification)
+    async def after_boot_notification(self, **kwargs):
+        if LAST_LIMIT is not None:   # Vorgabe von OpenEMS nach (Neu-)Verbindung nachsenden
+            await send_limit(LAST_LIMIT)
 
     @on(Action.heartbeat)
     async def on_heartbeat(self):
