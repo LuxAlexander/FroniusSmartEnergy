@@ -20,9 +20,11 @@ Start:
 
 import asyncio
 import csv
+import json
 import logging
 import os
 from datetime import datetime, timezone
+from urllib.parse import unquote
 
 import websockets
 from ocpp.routing import on
@@ -38,6 +40,7 @@ logger = logging.getLogger("wattpilot-ocpp")
 # ---------------------------------------------------------------------------
 HOST = "0.0.0.0"        # auf allen Netzwerk-Interfaces lauschen
 PORT = 9000              # Port, den du auch in der Wattpilot-App einträgst
+GOE_PORT = 8081          # HTTP-Schnittstelle für OpenEMS (Baustein Evcs.Goe.ChargerHome)
 # Jeder Serverstart schreibt in eine eigene Datei, z.B. logs/wattpilot_daten_20261119_101500.csv
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 CSV_FILE = os.path.join(LOG_DIR, f"wattpilot_daten_{datetime.now():%Y%m%d_%H%M%S}.csv")
@@ -78,6 +81,69 @@ async def log_row(**kwargs):
             writer.writerow(row)
 
 
+# ---------------------------------------------------------------------------
+# Aktueller Zustand der Wallbox (eine Wallbox, Connector 1) und
+# Schnittstelle zu OpenEMS im Format der go-e API v1 (GET /status).
+# OpenEMS liest das mit dem fertigen Baustein "Evcs.Goe.ChargerHome".
+# ---------------------------------------------------------------------------
+STATE = {"status": "Available", "meter_start": 0.0, "energy": 0.0, "offered": 0.0,
+         "current": [0.0, 0.0, 0.0], "power": [0.0, 0.0, 0.0], "power_sum": 0.0}
+
+# OCPP-Status -> go-e "car": 1 frei, 2 lädt, 3 wartet auf Auto, 4 fertig
+GOE_CAR = {"Available": 1, "Preparing": 3, "Charging": 2, "SuspendedEV": 3,
+           "SuspendedEVSE": 3, "Finishing": 4}
+
+
+def update_state(sample):
+    """Übernimmt einen sampledValue nach (measurand, phase) in STATE."""
+    measurand = sample.get("measurand", "Energy.Active.Import.Register")
+    phase = sample.get("phase", "")[:2]                  # "L1-N" -> "L1"
+    value = float(sample["value"]) * (1000 if sample.get("unit") in ("kW", "kWh") else 1)
+    n = int(phase[1]) - 1 if phase in ("L1", "L2", "L3") else None
+    if measurand == "Current.Import" and n is not None:
+        STATE["current"][n] = value
+    elif measurand == "Power.Active.Import":
+        if n is None:
+            STATE["power_sum"] = value
+        else:
+            STATE["power"][n] = value
+    elif measurand == "Energy.Active.Import.Register":
+        STATE["energy"] = value
+    elif measurand == "Current.Offered":
+        STATE["offered"] = value
+
+
+def goe_status():
+    """STATE als go-e-API-v1-JSON (Einzelwerte als Strings wie beim echten go-e)."""
+    s = STATE
+    volt = [round(p / i) if i > 1 else 230 for p, i in zip(s["power"], s["current"])]
+    pha = 0b111 | sum(8 << n for n, i in enumerate(s["current"]) if i > 1)  # Bit 3-5: aktive Phasen
+    nrg = volt + [0] + [round(i * 10) for i in s["current"]] \
+        + [round(p / 100) for p in s["power"]] + [0, round(s["power_sum"] / 10), 0, 0, 0, 0]
+    return {"version": "B", "fwv": "sim", "sse": "ocpp", "err": "0", "alw": "1", "cbl": "0",
+            "car": str(GOE_CAR.get(s["status"], 1)), "amp": str(round(s["offered"])),
+            "pha": str(pha), "eto": str(round(s["energy"] / 100)),
+            "dws": str(round(max(0.0, s["energy"] - s["meter_start"]) * 360)), "nrg": nrg}
+
+
+async def goe_http(reader, writer):
+    """Minimaler HTTP-Server: jede Anfrage bekommt den aktuellen Status.
+    Befehle von OpenEMS (/mqtt?payload=amp=10) werden geloggt, aber noch nicht
+    an die Wallbox weitergegeben (Phase D)."""
+    request = (await reader.readline()).decode(errors="ignore").split()
+    while (await reader.readline()) not in (b"\r\n", b"\n", b""):
+        pass                                             # Header überspringen
+    path = unquote(request[1]) if len(request) > 1 else "/"
+    if path.startswith("/mqtt"):
+        logger.info("Befehl von OpenEMS: %s", path)
+        await log_row(charge_point_id="openems", message_type="OpenEMS-Befehl", raw_payload=path)
+    body = json.dumps(goe_status()).encode()
+    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                 b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
+    await writer.drain()
+    writer.close()
+
+
 class WattpilotChargePoint(CP):
     """Repräsentiert die verbundene Wattpilot Flex und verarbeitet alle
     OCPP-1.6-Nachrichten, die sie an das Central System schickt."""
@@ -109,6 +175,8 @@ class WattpilotChargePoint(CP):
     @on(Action.status_notification)
     async def on_status_notification(self, connector_id, error_code, status, **kwargs):
         logger.info("StatusNotification: connector=%s status=%s error=%s", connector_id, status, error_code)
+        if connector_id == 1:
+            STATE["status"] = status
         await log_row(
             charge_point_id=self.id,
             message_type="StatusNotification",
@@ -132,6 +200,7 @@ class WattpilotChargePoint(CP):
     @on(Action.start_transaction)
     async def on_start_transaction(self, connector_id, id_tag, meter_start, timestamp, **kwargs):
         transaction_id = int(datetime.now().timestamp())  # simple eindeutige ID
+        STATE["meter_start"] = STATE["energy"] = float(meter_start)
         await log_row(
             charge_point_id=self.id,
             message_type="StartTransaction",
@@ -147,6 +216,8 @@ class WattpilotChargePoint(CP):
 
     @on(Action.stop_transaction)
     async def on_stop_transaction(self, meter_stop, timestamp, transaction_id, **kwargs):
+        # Nach dem Ende kommen keine MeterValues mehr -> Ist-Werte auf 0 setzen
+        STATE.update(energy=float(meter_stop), power_sum=0.0, current=[0.0] * 3, power=[0.0] * 3)
         await log_row(
             charge_point_id=self.id,
             message_type="StopTransaction",
@@ -161,6 +232,7 @@ class WattpilotChargePoint(CP):
         for mv in meter_value:
             ts = mv.get("timestamp", "")
             for sample in mv.get("sampled_value", []):
+                update_state(sample)
                 await log_row(
                     charge_point_id=self.id,
                     message_type="MeterValues",
@@ -211,12 +283,14 @@ async def main():
         "ws://<IP-dieses-Rechners>:%s/<CHARGEPOINT-ID>", PORT
     )
 
+    logger.info("go-e-Schnittstelle für OpenEMS: http://<IP-dieses-Rechners>:%s/status", GOE_PORT)
+
     async with websockets.serve(
         on_connect,
         HOST,
         PORT,
         subprotocols=["ocpp1.6"],
-    ):
+    ), await asyncio.start_server(goe_http, HOST, GOE_PORT):
         await asyncio.Future()  # läuft für immer
 
 
