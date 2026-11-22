@@ -428,3 +428,58 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Python environments (including the project's Python 3.12 environment)
+.venv/
+.venv[0-9]*/
+venv/
+venv[0-9]*/
+env/
+ENV/
+__pypackages__/
+*.py[cod]
+*$py.class
+
+# Python tooling, tests and packaging
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+dist/
+*.egg-info/
+.ipynb_checkpoints/
+
+# Local credentials; keep sanitised configuration examples versionable
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Personal IDE and operating system files
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Temporary document, editor and LaTeX output (keep source documents and PDFs)
+.~lock.*#
+*.swp
+*.swo
+*.bak
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+*.toc
+*.lof
+*.lot
+*.nav
+*.snm
+*.vrb
