@@ -21,7 +21,10 @@ client.py ──OCPP 1.6──► OCPP.py ──HTTP (go-e-Format)──► Open
 ```powershell
 .\start_all.ps1              # Ladevorgang 15 Minuten
 .\start_all.ps1 -Minuten 60  # andere Ladedauer
+.\start_all.ps1 -Echt        # echte Wattpilot statt Simulator
 ```
+
+Mit der **echten Wattpilot** muss der Rechner im Netz der Box sein und die Adresse haben, die in der Box als `CentralSystemAddress` eingetragen ist (derzeit `ws://192.168.88.242:9000/api/91136223`). Port 9000 muss in der Windows-Firewall freigegeben sein. Simulator und echte Box nie gleichzeitig verbinden.
 
 Das Skript öffnet je ein Fenster für Server, OpenEMS und Simulator, wartet jeweils, bis das Programm bereit ist, und öffnet zum Schluss die eigene Weboberfläche. Läuft schon eine Sitzung (Port 9000 oder 8075 belegt), bricht es ab. Beenden: die Fenster schließen oder darin `Strg+C`.
 
@@ -48,14 +51,17 @@ Die eigene Weboberfläche (Schritt 4) braucht keinen eigenen Server: `web\index.
 | OpenEMS-UI (Energiemonitor, Ladestation) | http://localhost:4200, Passwort `user` |
 | OpenEMS-Konfiguration | http://localhost:8080/system/console/configMgr, `admin` / `admin` |
 | Zustand der Wallbox, wie OpenEMS ihn liest | http://localhost:8081/status |
+| Alles vom OCPP-Server für die Oberfläche (Gerät, Einstellungen, letzte Nachrichten) | http://localhost:8081/wallbox |
 | Alle OCPP-Nachrichten | `logs/wattpilot_daten_<Datum>_<Uhrzeit>.csv` (je Serverstart eine Datei) |
 
 ## Einstellen
 
 | Was | Wo |
 |---|---|
+| Ladestrom direkt begrenzen (hat Vorrang vor OpenEMS) | Weboberfläche, Bereich „Wallbox (OCPP)“: Schieberegler 6–16 A, „Pause“, „Automatik (OpenEMS)“ |
 | Ladeleistung, die OpenEMS vorgibt | `openems/config/Controller/Evcs/ctrlEvcs0.config`: `forceChargeMinPower` (W pro Phase, 2300 = 10 A) |
 | PV-Leistung | `openems/config/Simulator/Datasource/Single/Direct/datasource0.config`: `values` |
+| Messintervall der Wallbox (`MeterValueSampleInterval`) | `METER_VALUE_SAMPLE_INTERVAL` oben in `OCPP.py` (derzeit 10 s); wird bei jeder Anmeldung per `ChangeConfiguration` gesetzt |
 | Ladedauer | zweites Argument von `client.py` (Minuten) |
 | Fahrzeug, Spannung, Takt | Konstanten oben in `client.py` |
 

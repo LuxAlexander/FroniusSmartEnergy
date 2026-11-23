@@ -18,7 +18,7 @@
   body { margin:0; font:15px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--text); }
   header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; padding:12px 16px; background:var(--card); border-bottom:1px solid var(--line); }
   header h1 { font-size:18px; margin:0 auto 0 0; }
-  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; gap:16px; }
+  main { max-width:1100px; margin:0 auto; padding:16px; display:grid; grid-template-columns:minmax(0, 1fr); gap:16px; }
   section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
   h2 { font-size:16px; margin:0 0 12px; }
   .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
@@ -39,6 +39,17 @@
   button.flat { background:#fff; color:var(--text); border-color:var(--line); }
   .muted { color:var(--muted); font-size:13px; }
   .chart { position:relative; height:320px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:500; }
+  td.num { font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .scroll { max-height:320px; overflow-y:auto; overflow-x:hidden; }
+  table.fixed { table-layout:fixed; }                 /* Spaltenbreiten fest, lange Werte brechen um */
+  table.fixed td { overflow-wrap:anywhere; }
+  .desc { color:var(--muted); font-size:12px; margin-top:2px; }
+  .phase { display:grid; grid-template-columns:auto repeat(4, 1fr); gap:4px 12px; font-variant-numeric:tabular-nums; }
+  .phase div:nth-child(-n+5) { color:var(--muted); font-size:13px; }
+  details summary { cursor:pointer; margin:12px 0 8px; font-weight:600; }
   @media (max-width:640px) { .flow { grid-template-columns:1fr; } .arrow { transform:rotate(90deg); } }
 </style>
 </head>
@@ -93,13 +104,48 @@
   </section>
 
   <section>
+    <h2>Wallbox (OCPP, direkt vom Server)</h2>
+    <p class="muted"><span id="w-dot" class="dot"></span><span id="w-conn">keine Daten vom OCPP-Server</span> · <span id="w-dev"></span></p>
+    <div class="tiles">
+      <div class="tile"><div class="k">OCPP-Status</div><div class="v" id="w-status">–</div></div>
+      <div class="tile"><div class="k">Vorgabe von OpenEMS</div><div class="v" id="w-limit">–</div></div>
+      <div class="tile"><div class="k">Angeboten (Box)</div><div class="v" id="w-offered">–</div></div>
+      <div class="tile"><div class="k">Frequenz</div><div class="v" id="w-freq">–</div></div>
+      <div class="tile"><div class="k">Zählerstand</div><div class="v" id="w-energy">–</div></div>
+    </div>
+    <div class="phase" style="margin-top:12px">
+      <div></div><div>L1</div><div>L2</div><div>L3</div><div>Summe</div>
+      <div class="muted">Strom</div><div id="w-i1">–</div><div id="w-i2">–</div><div id="w-i3">–</div><div></div>
+      <div class="muted">Leistung</div><div id="w-p1">–</div><div id="w-p2">–</div><div id="w-p3">–</div><div id="w-psum">–</div>
+    </div>
+    <h2 style="margin-top:16px">Ladestrom begrenzen (direkt per OCPP)</h2>
+    <div class="row">
+      <label style="flex:1; min-width:220px">Ladestrom: <b id="w-setval" style="color:var(--text)">10 A</b>
+        <input id="w-set" type="range" min="6" max="16" step="1" value="10" list="w-ticks"></label>
+      <datalist id="w-ticks"><option value="6"><option value="8"><option value="10"><option value="12"><option value="14"><option value="16"></datalist>
+      <button id="w-setbtn">Übernehmen</button>
+      <button class="flat" data-a="0">Pause (0 A)</button>
+      <button class="flat" data-a="auto">Automatik (OpenEMS)</button>
+    </div>
+    <p class="muted" id="w-ctrl"></p>
+    <details><summary>Einstellungen der Wallbox (GetConfiguration)</summary>
+      <div class="scroll"><table class="fixed"><colgroup><col style="width:45%"><col><col style="width:80px"></colgroup>
+        <thead><tr><th>Einstellung</th><th>Wert</th><th>änderbar</th></tr></thead><tbody id="w-config"></tbody></table></div>
+    </details>
+    <details open><summary>Nachrichten</summary>
+      <div class="scroll"><table class="fixed"><colgroup><col style="width:80px"><col style="width:30%"><col style="width:130px"><col></colgroup>
+        <thead><tr><th>Zeit</th><th>Nachricht</th><th>Status</th><th>Wert / Details</th></tr></thead><tbody id="w-log"></tbody></table></div>
+    </details>
+  </section>
+
+  <section>
     <h2>Verlauf</h2>
     <div class="row">
-      <label>von<input id="h-from" type="date"></label>
-      <label>bis<input id="h-to" type="date"></label>
-      <button class="flat" id="h-prev">‹ Tag</button>
-      <button class="flat" id="h-next">Tag ›</button>
-      <button id="h-load">Laden</button>
+      <label>Anzeigen<select id="h-span">
+        <option value="1440">alles (max. 24 h)</option><option value="360">letzte 6 h</option>
+        <option value="60">letzte Stunde</option><option value="15">letzte 15 min</option></select></label>
+      <span class="muted">Zeitraum:</span> <b id="h-range">–</b>
+      <button class="flat" id="h-load">Aktualisieren</button>
     </div>
     <div class="chart" style="margin-top:12px"><canvas id="h-chart"></canvas></div>
     <div class="tiles" style="margin-top:12px">
@@ -222,22 +268,33 @@ $("c-save").onclick = async () => {
 };
 
 // --- Verlauf -----------------------------------------------------------------
-const iso = d => d.toLocaleDateString("sv");                   // YYYY-MM-DD in Ortszeit
-function shiftDays(n) {
-  for (const id of ["h-from", "h-to"]) { const d = new Date($(id).value); d.setDate(d.getDate() + n); $(id).value = iso(d); }
-  loadHistory();
-}
-$("h-prev").onclick = () => shiftDays(-1);
-$("h-next").onclick = () => shiftDays(1);
+// Zeigt nur den Zeitraum, in dem Daten aufgezeichnet wurden – höchstens die letzten 24 h.
+const DAY_MS = 24 * 3600e3;
 $("h-load").onclick = () => loadHistory();
+$("h-span").onchange = () => loadHistory();
+setInterval(() => ws?.readyState === 1 && loadHistory().catch(() => {}), 60000);   // jede Minute neu
 
 async function loadHistory() {
-  const r = await edgeRpc("queryHistoricTimeseriesData", { fromDate: $("h-from").value, toDate: $("h-to").value,
-    channels: HISTORY, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
-  const t = r.timestamps.map(s => new Date(s)), d = r.data;
-  const multiDay = $("h-from").value !== $("h-to").value;
-  const labels = t.map(x => multiDay ? x.toLocaleString("de", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
-                                     : x.toLocaleTimeString("de", { hour: "2-digit", minute: "2-digit" }));
+  const now = new Date(), date = x => x.toLocaleDateString("sv");                    // YYYY-MM-DD in Ortszeit
+  const r = await edgeRpc("queryHistoricTimeseriesData", { fromDate: date(new Date(now - DAY_MS)), toDate: date(now),
+    channels: HISTORY, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, resolution: { value: 1, unit: "MINUTES" } });
+  const all = r.timestamps.map(s => new Date(s));
+  const since = now - Number($("h-span").value) * 60e3;                              // gewählter Bereich, max. 24 h
+  const withData = all.map((x, i) => i).filter(i => all[i] >= since && all[i] <= now
+                                                   && HISTORY.some(ch => r.data[ch][i] != null));
+  if (!withData.length) {
+    $("h-range").textContent = "keine Daten im gewählten Bereich";
+    if (chart) { chart.destroy(); chart = null; }
+    return;
+  }
+  const from = withData[0], to = withData[withData.length - 1] + 1;                   // erster bis letzter Messpunkt
+  const t = all.slice(from, to), d = Object.fromEntries(HISTORY.map(ch => [ch, r.data[ch].slice(from, to)]));
+  const multiDay = t[0].toDateString() !== t[t.length - 1].toDateString();
+  const label = x => multiDay ? x.toLocaleString("de", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+                              : x.toLocaleTimeString("de", { hour: "2-digit", minute: "2-digit" });
+  const mins = Math.round((t[t.length - 1] - t[0]) / 60000);
+  $("h-range").textContent = `${label(t[0])} – ${label(t[t.length - 1])} (${Math.floor(mins / 60)} h ${mins % 60} min)`;
+  const labels = t.map(label);
   const series = [["PV", HISTORY[0], "--pv"], ["Netz", HISTORY[1], "--grid"], ["Verbrauch", HISTORY[2], "--load"], ["Wallbox", HISTORY[3], "--evcs"]];
   const css = getComputedStyle(document.documentElement);
   if (chart) chart.destroy();
@@ -257,7 +314,113 @@ async function loadHistory() {
   $("s-aut").textContent = pct(autarky(buy, load)); $("s-self").textContent = pct(selfConsumption(sell, pv));
 }
 
-$("h-from").value = $("h-to").value = iso(new Date());
+// --- Wallbox-Details direkt vom OCPP-Server (GET /wallbox, Port 8081) ---------
+// Werte, die OpenEMS nicht kennt: angebotener Strom, Frequenz, Gerät, Einstellungen, Nachrichten.
+const OCPP_STATUS = { Available: "frei", Preparing: "Auto angesteckt", Charging: "lädt", SuspendedEV: "Pause (Auto)",
+  SuspendedEVSE: "Pause (Wallbox)", Finishing: "beendet", Reserved: "reserviert", Unavailable: "nicht verfügbar", Faulted: "Fehler" };
+const A = v => v == null ? "–" : Number(v).toFixed(2) + " A";
+const has = v => v != null && v !== "";
+
+// Kurzbeschreibung der Einstellungen (OCPP 1.6; „Fronius“ = herstellerspezifisch, Bedeutung aus Name/Wert abgeleitet)
+const CONFIG_INFO = {
+  AccessControl: "Fronius: Zugang zum Laden (Open = ohne Freigabe per Karte/App)",
+  AllowOfflineTxForUnknownId: "Ohne Serververbindung auch mit unbekannter Karte laden",
+  AuthorizeRemoteTxRequests: "Fernstart (RemoteStart) muss zusätzlich freigegeben werden",
+  AvailableFirmwares: "Fronius: verfügbare Firmware-Versionen",
+  CentralSystemAddress: "Fronius: Adresse des OCPP-Servers (Backend)",
+  ChargeProfileMaxStackLevel: "Höchste Prioritätsstufe für Ladeprofile",
+  ChargingScheduleAllowedChargingRateUnit: "Erlaubte Einheit in Ladeprofilen (Current = Ampere, Power = Watt)",
+  ChargingScheduleMaxPeriods: "Max. Zeitabschnitte pro Ladeprofil",
+  ClockAlignedDataInterval: "Intervall für Messwerte zu festen Uhrzeiten in s (0 = aus)",
+  ConnectorPhaseRotation: "Phasenreihenfolge je Anschluss (RST = L1-L2-L3)",
+  ConnectorPhaseRotationMaxLength: "Max. Einträge für die Phasenreihenfolge",
+  ConnectorSwitch3to1PhaseSupported: "Umschalten von 3- auf 1-phasig möglich",
+  ForceState: "Fronius: Laden erzwingen/sperren (Neutral = normaler Betrieb)",
+  GetConfigurationMaxKeys: "Max. Einstellungen pro Abfrage",
+  HeartbeatInterval: "Abstand der Heartbeat-Nachrichten in s",
+  LightIntensity: "Fronius: Helligkeit der LEDs",
+  LocalAuthListEnabled: "Lokale Liste freigegebener Karten aktiv",
+  LocalAuthListMaxLength: "Max. Einträge der lokalen Kartenliste",
+  LocalAuthorizeOffline: "Ohne Serververbindung über die lokale Liste freigeben",
+  MaxChargingProfilesInstalled: "Max. gleichzeitig gespeicherte Ladeprofile",
+  MeterValueSampleInterval: "Abstand der Messwerte während des Ladens in s",
+  MeterValuesAlignedData: "Messgrößen für Messwerte zu festen Uhrzeiten",
+  MeterValuesAlignedDataMaxLength: "Max. Anzahl Messgrößen (feste Uhrzeiten)",
+  MeterValuesSampledData: "Messgrößen, die während des Ladens gesendet werden",
+  MeterValuesSampledDataMaxLength: "Max. Anzahl Messgrößen (Laden)",
+  MinChargingCurrent: "Fronius: kleinster Ladestrom in A",
+  NumberOfConnectors: "Anzahl der Ladeanschlüsse",
+  PairingHash: "Fronius: Kopplungsdaten (vermutlich für die App)",
+  PairingNonce: "Fronius: Kopplungsdaten (vermutlich für die App)",
+  PlugAndChargeIdentifier: "Fronius: Karten-ID beim Laden ohne Karte",
+  RecommendedFirmware: "Fronius: empfohlene Firmware-Version",
+  RequestedCurrent: "Fronius: eingestellter Ladestrom in A",
+  SendLocalListMaxLength: "Max. Einträge pro Übertragung der Kartenliste",
+  "Station-MaxCurrent": "Fronius: höchster Ladestrom der Station in A",
+  SupportedFeatureProfiles: "Unterstützte OCPP-Funktionsbereiche",
+  SupportedFeatureProfilesMaxLength: "Max. Anzahl Funktionsbereiche",
+  UnlockConnectorOnEVSideDisconnect: "Kabel entriegeln, wenn es am Auto abgezogen wird",
+  WebSocketPingInterval: "Abstand der Websocket-Pings in s",
+};
+const esc = s => String(s ?? "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+const serverUrl = path => `http://${$("host").value.split(":")[0]}:8081${path}`;
+
+// Ladestrom begrenzen: Server schickt SetChargingProfile (TxDefaultProfile, A). Manuell hat Vorrang vor OpenEMS.
+const setLimit = a => loadWallbox(`/limit?a=${a}`, { method: "POST" });
+let sliderMoved = false;                       // Regler verschoben, aber noch nicht übernommen
+$("w-set").oninput = () => { sliderMoved = true; $("w-setval").textContent = $("w-set").value + " A (noch nicht übernommen)"; };
+$("w-setbtn").onclick = () => { sliderMoved = false; setLimit($("w-set").value); };   // senden erst mit „Übernehmen“
+document.querySelectorAll?.("button[data-a]").forEach(b => b.onclick = () => setLimit(b.dataset.a));
+
+function showControl(w) {
+  const time = t => new Date(t).toLocaleTimeString("de"), p = w.last_profile;
+  const target = w.manual_limit ?? w.limit_from_openems;
+  let text = "Modus: " + (w.manual_limit == null
+    ? `Automatik (OpenEMS: ${w.limit_from_openems == null ? "noch keine Vorgabe" : A(w.limit_from_openems)})`
+    : `manuell ${A(w.manual_limit)}`);
+  if (p.limit != null) text += ` · zuletzt gesendet ${A(p.limit)} um ${time(p.time)}, Antwort: ${p.status}`;
+  if (target != null && p.status === "Accepted")      // bestätigt, wenn die Box den Strom auch anbietet
+    text += Number(w.state.offered) === target ? ` · ✓ Box bietet ${A(target)} an` : " · warte auf nächsten Messwert der Box (bis 60 s)";
+  if (w.error) text += " · ⚠ " + w.error;
+  $("w-ctrl").textContent = text;
+  if (w.manual_limit >= 6 && !sliderMoved) {                           // Regler zeigt das gesetzte Limit
+    $("w-set").value = w.manual_limit; $("w-setval").textContent = w.manual_limit + " A";
+  }
+}
+
+async function loadWallbox(path = "/wallbox", options) {
+  let w;
+  try { w = await (await fetch(serverUrl(path), options)).json(); }
+  catch { $("w-dot").className = "dot"; $("w-conn").textContent = "OCPP-Server nicht erreichbar"; return; }
+  showControl(w);
+  const s = w.state, last = w.recent.find(r => r.charge_point_id !== "openems");
+  const age = last ? (Date.now() - new Date(last.timestamp)) / 1000 : Infinity;
+  const online = w.connected.length > 0 && age < 90;
+  $("w-dot").className = online ? "dot on" : "dot";
+  $("w-conn").textContent = w.connected.length ? `verbunden (${w.connected.join(", ")}), letzte Nachricht vor ${Math.round(age)} s` : "keine Wallbox verbunden";
+  const i = w.info;
+  $("w-dev").textContent = i.vendor ? `${i.vendor} ${i.model} · Seriennr. ${i.charge_point_serial_number ?? "–"} · Firmware ${i.firmware_version ?? "–"}` : "";
+  $("w-status").textContent = OCPP_STATUS[s.status] ?? s.status;
+  $("w-limit").textContent = w.limit_from_openems == null ? "keine" : A(w.limit_from_openems);
+  $("w-offered").textContent = `${A(s.offered)} · ${W(s.power_offered)}`;
+  $("w-freq").textContent = s.frequency == null ? "–" : s.frequency.toFixed(2) + " Hz";
+  $("w-energy").textContent = kWh(s.energy);
+  s.current.forEach((v, n) => $(`w-i${n + 1}`).textContent = A(v));
+  s.power.forEach((v, n) => $(`w-p${n + 1}`).textContent = W(Math.max(v, 0)));   // kleine negative Werte = Messrauschen
+  $("w-psum").textContent = W(Math.max(s.power_sum, 0));
+
+  $("w-config").innerHTML = w.config.map(k =>
+    `<tr><td>${esc(k.key)}<div class="desc">${esc(CONFIG_INFO[k.key] ?? "")}</div></td>` +
+    `<td>${esc(String(k.value ?? "").replaceAll(",", ", "))}</td><td>${k.readonly ? "nein" : "ja"}</td></tr>`).join("");
+  $("w-log").innerHTML = w.recent.filter(r => !["MeterValues", "GetConfiguration"].includes(r.message_type)).slice(0, 40).map(r =>
+    `<tr><td class="num">${new Date(r.timestamp).toLocaleTimeString("de")}</td><td>${esc(r.message_type)}${has(r.connector_id) ? " #" + r.connector_id : ""}</td>` +
+    `<td>${esc(OCPP_STATUS[r.status] ?? r.status)}</td><td>${esc(has(r.meter_value) ? r.meter_value
+      : String(r.raw_payload ?? "").startsWith("{") ? (r.error_code && r.error_code !== "NoError" ? r.error_code : "") : r.raw_payload)}</td></tr>`).join("");
+}
+setInterval(loadWallbox, 5000);
+loadWallbox();
+
 $("connect").onclick = connect;
 connect();
 </script>

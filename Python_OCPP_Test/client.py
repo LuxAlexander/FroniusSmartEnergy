@@ -68,6 +68,24 @@ class Wallbox(ChargePoint):
         print(f"SetChargingProfile: Limit {limit:.1f} A ({profile['charging_profile_purpose']})")
         return call_result.SetChargingProfile(status=ChargingProfileStatus.accepted)
 
+    @on(Action.get_configuration)
+    async def on_get_configuration(self, key=None, **kwargs):
+        """Meldet die Parameter dieses Simulators (nicht die der echten Wattpilot)."""
+        values = {
+            "NumberOfConnectors": "1",
+            "SupportedFeatureProfiles": "Core,SmartCharging",
+            "HeartbeatInterval": str(TICK),
+            "MeterValueSampleInterval": str(TICK * 2),
+            "MeterValuesSampledData": "Current.Import,Current.Offered,Energy.Active.Import.Register,"
+                                      "Frequency,Power.Active.Import,Power.Offered",
+            "ChargingScheduleAllowedChargingRateUnit": "Current,Power",
+            "ChargingScheduleMaxPeriods": "1",
+        }
+        requested = key or list(values)
+        return call_result.GetConfiguration(
+            configuration_key=[{"key": k, "readonly": True, "value": values[k]} for k in requested if k in values],
+            unknown_key=[k for k in requested if k not in values])
+
     @on(Action.clear_charging_profile)
     async def on_clear_charging_profile(self, **kwargs):
         self.limit_a = I_MAX

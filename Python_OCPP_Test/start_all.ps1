@@ -2,8 +2,9 @@
 #   1. OCPP-Server   2. OpenEMS (+ OpenEMS-UI)   3. Wallbox-Simulator   4. eigene Weboberfläche
 # Aufruf:  .\start_all.ps1            (Ladevorgang 15 Minuten)
 #          .\start_all.ps1 -Minuten 60
+#          .\start_all.ps1 -Echt          (echte Wattpilot statt Simulator; sie verbindet sich selbst)
 # Beenden: in jedem Fenster Strg+C bzw. Fenster schließen.
-param([int]$Minuten = 15)
+param([int]$Minuten = 15, [switch]$Echt)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -34,7 +35,8 @@ Wait-Port 9000 "OCPP-Server" 30
 Start-Window "2 OpenEMS" "& '.\openems\start.ps1'"
 Wait-Port 8075 "OpenEMS" 300
 
-Start-Window "3 Wallbox-Simulator" "python client.py ws://localhost:9000/TESTCP01 $Minuten"
+if ($Echt) { Write-Host "Kein Simulator - warte auf die echte Wattpilot (verbindet sich selbst mit Port 9000)." }
+else { Start-Window "3 Wallbox-Simulator" "python client.py ws://localhost:9000/TESTCP01 $Minuten" }
 
 Start-Process (Join-Path $PSScriptRoot "web\index.html")
 Write-Host "Alles gestartet. Eigene Oberflaeche: web\index.html, OpenEMS-UI: http://localhost:4200"

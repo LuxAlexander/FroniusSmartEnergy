@@ -23,6 +23,7 @@ import csv
 import json
 import logging
 import os
+from collections import deque
 from datetime import datetime, timezone
 from urllib.parse import unquote
 
@@ -42,6 +43,7 @@ logger = logging.getLogger("wattpilot-ocpp")
 HOST = "0.0.0.0"        # auf allen Netzwerk-Interfaces lauschen
 PORT = 9000              # Port, den du auch in der Wattpilot-App einträgst
 GOE_PORT = 8081          # HTTP-Schnittstelle für OpenEMS (Baustein Evcs.Goe.ChargerHome)
+METER_VALUE_SAMPLE_INTERVAL = 10   # s, Messintervall, das der Server bei jeder Anmeldung an der Wallbox einstellt
 # Jeder Serverstart schreibt in eine eigene Datei, z.B. logs/wattpilot_daten_20261119_101500.csv
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 CSV_FILE = os.path.join(LOG_DIR, f"wattpilot_daten_{datetime.now():%Y%m%d_%H%M%S}.csv")
@@ -76,6 +78,7 @@ async def log_row(**kwargs):
     row = {field: "" for field in CSV_FIELDS}
     row["timestamp"] = datetime.now(timezone.utc).isoformat()
     row.update(kwargs)
+    RECENT.appendleft(row)                     # letzte Nachrichten für die Weboberfläche
     async with _csv_lock:
         with open(CSV_FILE, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
@@ -88,7 +91,12 @@ async def log_row(**kwargs):
 # OpenEMS liest das mit dem fertigen Baustein "Evcs.Goe.ChargerHome".
 # ---------------------------------------------------------------------------
 STATE = {"status": "Available", "meter_start": 0.0, "energy": 0.0, "offered": 0.0,
-         "current": [0.0, 0.0, 0.0], "power": [0.0, 0.0, 0.0], "power_sum": 0.0}
+         "current": [0.0, 0.0, 0.0], "power": [0.0, 0.0, 0.0], "power_sum": 0.0,
+         "frequency": None, "power_offered": None}
+# Zusätzlich für die Weboberfläche (GET /wallbox): Daten, die OpenEMS nicht kennt
+INFO = {}                                      # Hersteller, Modell, Seriennummer, Firmware
+CONFIG = []                                    # Antwort auf GetConfiguration
+RECENT = deque(maxlen=300)                     # letzte CSV-Zeilen
 
 # OCPP-Status -> go-e "car": 1 frei, 2 lädt, 3 wartet auf Auto, 4 fertig
 GOE_CAR = {"Available": 1, "Preparing": 3, "Charging": 2, "SuspendedEV": 3,
@@ -112,6 +120,10 @@ def update_state(sample):
         STATE["energy"] = value
     elif measurand == "Current.Offered":
         STATE["offered"] = value
+    elif measurand == "Power.Offered":
+        STATE["power_offered"] = value
+    elif measurand == "Frequency":
+        STATE["frequency"] = value
 
 
 def goe_status():
@@ -134,7 +146,14 @@ def goe_status():
 # ---------------------------------------------------------------------------
 CHARGE_POINTS = {}                       # verbundene Wallboxen: ID -> WattpilotChargePoint
 GOE_CMD = {}                             # zuletzt von OpenEMS gesetzte Werte, z.B. {"amp": "10"}
-LAST_LIMIT = None                        # zuletzt an die Wallbox gesendetes Limit (A)
+LAST_LIMIT = None                        # letztes Limit von OpenEMS (A)
+MANUAL_LIMIT = None                      # Limit aus der Weboberfläche (A); hat Vorrang vor OpenEMS
+LAST_PROFILE = {}                        # zuletzt gesendetes Profil: Limit, Antwort, Zeit
+
+
+def active_limit():
+    """Limit, das an die Wallbox gehen soll: manuell vor OpenEMS."""
+    return MANUAL_LIMIT if MANUAL_LIMIT is not None else LAST_LIMIT
 
 
 def tx_default_profile(limit_a):
@@ -154,6 +173,7 @@ async def send_limit(limit_a):
             status = res.status
         except Exception as e:                           # Timeout, Verbindung weg, ...
             status = f"Fehler: {e!r}"
+        LAST_PROFILE.update(limit=limit_a, status=status, time=datetime.now(timezone.utc).isoformat())
         logger.info("SetChargingProfile %s A an '%s': %s", limit_a, cp.id, status)
         await log_row(charge_point_id=cp.id, message_type="SetChargingProfile",
                       meter_value=limit_a, status=status)
@@ -176,7 +196,28 @@ async def handle_goe_command(path):
         return
     if limit != LAST_LIMIT:
         LAST_LIMIT = limit
-        asyncio.create_task(send_limit(limit))           # HTTP-Antwort nicht blockieren
+        if MANUAL_LIMIT is None:                         # manuelles Limit hat Vorrang
+            asyncio.create_task(send_limit(limit))       # HTTP-Antwort nicht blockieren
+
+
+async def handle_manual_limit(path):
+    """'/limit?a=10' setzt ein manuelles Limit (0 = Pause, sonst 6-16 A); '/limit?a=auto' gibt an OpenEMS zurück."""
+    global MANUAL_LIMIT
+    value = path.partition("a=")[2]
+    if value == "auto":
+        MANUAL_LIMIT = None
+    else:
+        try:
+            limit = float(value)
+        except ValueError:
+            return "Ungültiger Wert"
+        if not (limit == 0 or 6 <= limit <= 16):         # MinChargingCurrent 6, Station-MaxCurrent 16
+            return "Erlaubt sind 0 A (Pause) oder 6 bis 16 A"
+        MANUAL_LIMIT = limit
+    await log_row(charge_point_id="web", message_type="Manuelles Limit", raw_payload=value)
+    if active_limit() is not None:
+        asyncio.create_task(send_limit(active_limit()))
+    return None
 
 
 async def goe_http(reader, writer):
@@ -186,10 +227,19 @@ async def goe_http(reader, writer):
     while (await reader.readline()) not in (b"\r\n", b"\n", b""):
         pass                                             # Header überspringen
     path = unquote(request[1]) if len(request) > 1 else "/"
+    error = None
     if path.startswith("/mqtt"):
         await handle_goe_command(path)
-    body = json.dumps(goe_status()).encode()
-    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+    if path.startswith("/limit"):                        # Ladestrom aus der Weboberfläche begrenzen
+        error = await handle_manual_limit(path)
+    if path.startswith(("/wallbox", "/limit")):          # alles für die eigene Weboberfläche
+        data = {"connected": list(CHARGE_POINTS), "state": STATE, "info": INFO,
+                "config": CONFIG, "recent": list(RECENT), "limit_from_openems": LAST_LIMIT,
+                "manual_limit": MANUAL_LIMIT, "last_profile": LAST_PROFILE, "error": error}
+    else:
+        data = goe_status()
+    body = json.dumps(data, default=str).encode()
+    writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n"
                  b"Content-Length: %d\r\nConnection: close\r\n\r\n" % len(body) + body)
     await writer.drain()
     writer.close()
@@ -211,6 +261,7 @@ class WattpilotChargePoint(CP):
             message_type="BootNotification",
             raw_payload=f"vendor={charge_point_vendor}, model={charge_point_model}, {kwargs}",
         )
+        INFO.update(id=self.id, vendor=charge_point_vendor, model=charge_point_model, **kwargs)
         return call_result.BootNotification(
             current_time=datetime.now(timezone.utc).isoformat(),
             interval=30,  # Heartbeat-Intervall in Sekunden
@@ -219,8 +270,49 @@ class WattpilotChargePoint(CP):
 
     @after(Action.boot_notification)
     async def after_boot_notification(self, **kwargs):
-        if LAST_LIMIT is not None:   # Vorgabe von OpenEMS nach (Neu-)Verbindung nachsenden
-            await send_limit(LAST_LIMIT)
+        # Die Wattpilot schickt beim Verbinden mehrere BootNotifications kurz hintereinander;
+        # Limit und Einstellungen nur einmal pro Verbindung senden bzw. lesen.
+        if getattr(self, "booted", False):
+            return
+        self.booted = True
+        if active_limit() is not None:   # Vorgabe nach (Neu-)Verbindung nachsenden
+            await send_limit(active_limit())
+        await self.change_configuration("MeterValueSampleInterval", str(METER_VALUE_SAMPLE_INTERVAL))
+        await self.read_configuration()
+
+    async def change_configuration(self, key, value):
+        """Ändert eine Einstellung der Wallbox (ChangeConfiguration) und schreibt die Antwort in die CSV."""
+        try:
+            res = await self.call(call.ChangeConfiguration(key=key, value=value))
+            status = res.status if res else "nicht unterstützt"   # None, wenn die Wallbox mit Fehler antwortet
+        except Exception as e:                                     # z.B. keine Antwort (Timeout)
+            status = f"Fehler: {e!r}"
+        logger.info("ChangeConfiguration %s=%s an '%s': %s", key, value, self.id, status)
+        await log_row(charge_point_id=self.id, message_type="ChangeConfiguration",
+                      status=status, raw_payload=f"{key}={value}")
+
+    async def read_configuration(self):
+        """Liest alle Einstellungen der Wallbox (GetConfiguration) und schreibt sie in die CSV."""
+        try:
+            res = await self.call(call.GetConfiguration())   # None, wenn die Wallbox mit Fehler antwortet
+        except Exception as e:                                # z.B. keine Antwort (Timeout)
+            res, error = None, repr(e)
+        else:
+            error = "nicht unterstützt" if res is None else None
+        if error:
+            logger.warning("GetConfiguration von '%s': %s", self.id, error)
+            await log_row(charge_point_id=self.id, message_type="GetConfiguration", status=f"Fehler: {error}")
+            return
+        keys = res.configuration_key or []
+        CONFIG[:] = keys
+        logger.info("GetConfiguration von '%s': %d Einstellungen", self.id, len(keys))
+        for k in keys:
+            await log_row(charge_point_id=self.id, message_type="GetConfiguration",
+                          status="nur lesbar" if k.get("readonly") else "änderbar",
+                          raw_payload=f"{k['key']}={k.get('value', '')}")
+        for k in res.unknown_key or []:
+            await log_row(charge_point_id=self.id, message_type="GetConfiguration",
+                          status="unbekannt", raw_payload=k)
 
     @on(Action.heartbeat)
     async def on_heartbeat(self):
